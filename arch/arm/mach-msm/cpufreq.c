@@ -30,11 +30,18 @@
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
+#include <trace/events/power.h>
 #include <mach/socinfo.h>
 #include <mach/cpufreq.h>
 #include <mach/msm_bus.h>
 
 #include "acpuclock.h"
+
+#ifdef CONFIG_DEBUG_FS
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
+#include <asm/div64.h>
+#endif
 
 static DEFINE_MUTEX(l2bw_lock);
 
@@ -157,6 +164,7 @@ static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq,
 
 	cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
 
+	trace_cpu_frequency_switch_start(freqs.old, freqs.new, policy->cpu);
 	if (is_clk) {
 		unsigned long rate = new_freq * 1000;
 		rate = clk_round_rate(cpu_clk[policy->cpu], rate);
@@ -169,8 +177,10 @@ static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq,
 		ret = acpuclk_set_rate(policy->cpu, new_freq, SETRATE_CPUFREQ);
 	}
 
-	if (!ret)
+	if (!ret) {
+		trace_cpu_frequency_switch_end(policy->cpu);
 		cpufreq_notify_transition(&freqs, CPUFREQ_POSTCHANGE);
+	}
 
 	/* Restore priority after clock ramp-up */
 	if (freqs.new > freqs.old && saved_sched_policy >= 0) {
@@ -199,6 +209,15 @@ static int msm_cpufreq_target(struct cpufreq_policy *policy,
 	struct cpufreq_frequency_table *table;
 
 	struct cpufreq_work_struct *cpu_work = NULL;
+	cpumask_var_t mask;
+
+	if (!cpu_active(policy->cpu)) {
+		pr_info("cpufreq: cpu %d is not active.\n", policy->cpu);
+		return -ENODEV;
+	}
+
+	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+		return -ENOMEM;
 
 	mutex_lock(&per_cpu(cpufreq_suspend, policy->cpu).suspend_mutex);
 
@@ -217,6 +236,11 @@ static int msm_cpufreq_target(struct cpufreq_policy *policy,
 		goto done;
 	}
 
+	if (table[index].frequency == policy->cur){
+		ret = 0;
+		goto done;
+	}
+	
 	pr_debug("CPU[%d] target %d relation %d (%d-%d) selected %d\n",
 		policy->cpu, target_freq, relation,
 		policy->min, policy->max, table[index].frequency);
@@ -227,14 +251,23 @@ static int msm_cpufreq_target(struct cpufreq_policy *policy,
 	cpu_work->index = table[index].index;
 	cpu_work->status = -ENODEV;
 
-	cancel_work_sync(&cpu_work->work);
-	INIT_COMPLETION(cpu_work->complete);
-	queue_work_on(policy->cpu, msm_cpufreq_wq, &cpu_work->work);
-	wait_for_completion(&cpu_work->complete);
+	cpumask_clear(mask);
+	cpumask_set_cpu(policy->cpu, mask);
+	if (cpumask_equal(mask, &current->cpus_allowed)) {
+		ret = set_cpu_freq(cpu_work->policy, cpu_work->frequency,
+		cpu_work->index);
+		goto done;
+	} else {
+		cancel_work_sync(&cpu_work->work);
+		INIT_COMPLETION(cpu_work->complete);
+		queue_work_on(policy->cpu, msm_cpufreq_wq, &cpu_work->work);
+		wait_for_completion(&cpu_work->complete);
+	}
 
 	ret = cpu_work->status;
 
 done:
+	free_cpumask_var(mask);
 	mutex_unlock(&per_cpu(cpufreq_suspend, policy->cpu).suspend_mutex);
 	return ret;
 }
@@ -248,6 +281,9 @@ static int msm_cpufreq_verify(struct cpufreq_policy *policy)
 
 static unsigned int msm_cpufreq_get_freq(unsigned int cpu)
 {
+	if (is_clk && is_sync)
+		cpu = 0;
+
 	if (is_clk)
 		return clk_get_rate(cpu_clk[cpu]) / 1000;
 
@@ -333,6 +369,10 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 	 */
 	if (cpu_is_msm8625() || (is_clk && is_sync))
 		cpumask_setall(policy->cpus);
+	
+	/* synchronous cpus share the same policy */
+	if (is_clk && !cpu_clk[policy->cpu])
+		return 0;
 
 	if (cpufreq_frequency_table_cpuinfo(policy, table)) {
 #ifdef CONFIG_MSM_CPU_FREQ_SET_MIN_MAX
@@ -371,6 +411,10 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 
 	policy->cpuinfo.transition_latency =
 		acpuclk_get_switch_time() * NSEC_PER_USEC;
+
+	/* maxwen: I want unified scaling and governor behaviour for all CPUs */
+	policy->shared_type = CPUFREQ_SHARED_TYPE_ALL;
+	cpumask_copy(policy->related_cpus, cpu_possible_mask);
 
 	cpu_work = &per_cpu(cpufreq_work, policy->cpu);
 	INIT_WORK(&cpu_work->work, set_cpu_work);
@@ -605,6 +649,49 @@ static int cpufreq_parse_dt(struct device *dev)
 	return 0;
 }
 
+#ifdef CONFIG_DEBUG_FS
+static int msm_cpufreq_show(struct seq_file *m, void *unused)
+{
+	unsigned int i, cpu_freq;
+	uint64_t ib;
+
+	if (!freq_table)
+		return 0;
+
+	seq_printf(m, "%10s%10s", "CPU (KHz)", "L2 (KHz)");
+	if (bus_bw.usecase)
+		seq_printf(m, "%12s", "Mem (MBps)");
+	seq_printf(m, "\n");
+
+	for (i = 0; freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		cpu_freq = freq_table[i].frequency;
+		if (cpu_freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+		seq_printf(m, "%10d", cpu_freq);
+		seq_printf(m, "%10d", l2_khz ? l2_khz[i] : cpu_freq);
+		if (bus_bw.usecase) {
+			ib = bus_bw.usecase[i].vectors[0].ib;
+			do_div(ib, 1000000);
+			seq_printf(m, "%12llu", ib);
+		}
+		seq_printf(m, "\n");
+	}
+	return 0;
+}
+
+static int msm_cpufreq_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, msm_cpufreq_show, inode->i_private);
+}
+
+const struct file_operations msm_cpufreq_fops = {
+	.open		= msm_cpufreq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+#endif
+
 static int __init msm_cpufreq_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -643,6 +730,13 @@ static int __init msm_cpufreq_probe(struct platform_device *pdev)
 	}
 
 	is_clk = true;
+
+#ifdef CONFIG_DEBUG_FS
+	if (!debugfs_create_file("msm_cpufreq", S_IRUGO, NULL, NULL,
+		&msm_cpufreq_fops))
+		return -ENOMEM;
+#endif
+
 	return 0;
 }
 
@@ -674,4 +768,4 @@ static int __init msm_cpufreq_register(void)
 	return cpufreq_register_driver(&msm_cpufreq_driver);
 }
 
-device_initcall(msm_cpufreq_register);
+late_initcall(msm_cpufreq_register);
