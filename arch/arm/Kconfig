@@ -1513,6 +1513,7 @@ config KSAPI
 endmenu
 
 source "arch/arm/common/Kconfig"
+source "arch/arm/hotplug/Kconfig"
 
 menu "Bus support"
 
@@ -2349,6 +2350,8 @@ config CPU_FREQ_S3C24XX_DEBUGFS
 endif
 
 source "drivers/cpuidle/Kconfig"
+
+source "drivers/cpuquiet/Kconfig"
 
 endmenu
 
