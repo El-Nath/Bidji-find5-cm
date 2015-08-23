@@ -56,19 +56,16 @@
 #include <mach/msm_bus.h>
 #include <mach/rpm-regulator.h>
 
-#ifdef CONFIG_FORCE_FAST_CHARGE
-#include <linux/fastchg.h>
-<<<<<<< HEAD
-#endif
-=======
->>>>>>> a09aa931c7c35966214a1e4bf37e3efc73abe50e
-
 #ifdef CONFIG_MACH_OPPO
 #include <linux/pcb_version.h>
 #endif
 
 #ifdef CONFIG_MACH_N1
 #include <linux/power/smb358_charger.h>
+#endif
+
+#ifdef CONFIG_FORCE_FAST_CHARGE
+#include <linux/fastchg.h>
 #endif
 
 #define MSM_USB_BASE	(motg->regs)
