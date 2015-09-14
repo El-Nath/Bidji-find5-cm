@@ -1847,7 +1847,7 @@ static struct platform_device msm_tsens_device = {
 static struct msm_thermal_data msm_thermal_pdata = {
 	.sensor_id = 7,
 	.poll_ms = 250,
-	.limit_temp_degC = 60,
+	.limit_temp_degC = 65,
 	.temp_hysteresis_degC = 10,
 	.freq_step = 2,
 	.core_limit_temp_degC = 80,
@@ -2676,7 +2676,7 @@ static struct msm_i2c_platform_data apq8064_i2c_qup_gsbi3_pdata = {
 };
 
 static struct msm_i2c_platform_data apq8064_i2c_qup_gsbi4_pdata = {
-	.clk_freq = 100000,
+	.clk_freq = 384000,//100000,/*OPPO*/
 	.src_clk_rate = 24000000,
 };
 
@@ -2686,7 +2686,7 @@ static struct msm_i2c_platform_data mpq8064_i2c_qup_gsbi5_pdata = {
 };
 
 static struct msm_i2c_platform_data apq8064_i2c_qup_gsbi7_pdata = {
-	.clk_freq = 100000,
+	.clk_freq = 384000,//100000,/*OPPO*/
 	.src_clk_rate = 24000000,
 };
 
