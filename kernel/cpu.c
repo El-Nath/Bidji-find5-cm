@@ -10,13 +10,16 @@
 #include <linux/sched.h>
 #include <linux/unistd.h>
 #include <linux/cpu.h>
+#include <linux/oom.h>
+#include <linux/rcupdate.h>
 #include <linux/export.h>
+#include <linux/bug.h>
 #include <linux/kthread.h>
 #include <linux/stop_machine.h>
 #include <linux/mutex.h>
 #include <linux/gfp.h>
 #include <linux/suspend.h>
-
+#include <linux/ratelimit.h>
 #include <trace/events/sched.h>
 
 #ifdef CONFIG_SMP
