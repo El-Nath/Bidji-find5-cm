@@ -42,7 +42,6 @@ static struct msm_thermal_stat_data msm_thermal_stats;
 static uint32_t hist_index = 0;
 #endif
 
-static int enabled;
 static struct msm_thermal_data msm_thermal_info = {
 	.sensor_id = 5,
 	.poll_ms = DEFAULT_POLLING_MS,
@@ -60,6 +59,7 @@ static bool core_control_enabled;
 static uint32_t cpus_offlined;
 static DEFINE_MUTEX(core_control_mutex);
 
+static int intelli_enabled;
 static int limit_idx;
 
 /*
@@ -307,7 +307,7 @@ static void __ref check_temp(struct work_struct *work)
 	do_freq_control(temp);
 	/* pr_info("msm_thermal: worker is alive!\n"); */
 reschedule:
-	if (enabled)
+	if (intelli_enabled)
 		schedule_delayed_work(&check_temp_work,
  						msecs_to_jiffies(msm_thermal_info.poll_ms));
 }
@@ -329,7 +329,6 @@ static int __ref msm_thermal_cpu_callback(struct notifier_block *nfb,
 			return NOTIFY_BAD;
 		}
 	}
-
 
 	return NOTIFY_OK;
 }
@@ -358,36 +357,36 @@ static void __ref disable_msm_thermal(void)
 	}
 }
 
-static int __cpuinit set_enabled(const char *val, const struct kernel_param *kp)
+static int __cpuinit set_intelli_enabled(const char *val, const struct kernel_param *kp)
 {
 	int ret = 0;
 
 	if (*val == '0' || *val == 'n' || *val == 'N') {
-		enabled = 0;
+		intelli_enabled = 0;
 		disable_msm_thermal();
 		pr_info("msm_thermal: disabling...\n");
 	} else {
-		if (!enabled) {
-			enabled = 1;
+		if (!intelli_enabled) {
+			intelli_enabled = 1;
 			schedule_delayed_work(&check_temp_work,
 					msecs_to_jiffies(1000));
 			pr_info("msm_thermal: rescheduling...\n");
 		} else
 			pr_info("msm_thermal: already running...\n");
 	}
-	pr_info("%s: enabled = %d\n", KBUILD_MODNAME, enabled);
+	pr_info("%s: enabled = %d\n", KBUILD_MODNAME, intelli_enabled);
 	ret = param_set_bool(val, kp);
 
 	return ret;
 }
 
 static struct kernel_param_ops module_ops = {
-	.set = set_enabled,
+	.set = set_intelli_enabled,
 	.get = param_get_bool,
 };
 
-module_param_cb(enabled, &module_ops, &enabled, 0664);
-MODULE_PARM_DESC(enabled, "enforce thermal limit on cpu");
+module_param_cb(intelli_enabled, &module_ops, &intelli_enabled, 0664);
+MODULE_PARM_DESC(intelli_enabled, "enforce thermal limit on cpu");
 
 #ifdef CONFIG_INTELLI_THERMAL_STATS
 static ssize_t show_thermal_stats(struct kobject *kobj,
@@ -553,7 +552,7 @@ static ssize_t __ref store_cpus_offlined(struct kobject *kobj,
 		goto done_cc;
 	}
 
-	if (enabled) {
+	if (intelli_enabled) {
 		pr_err("%s: Ignoring request; polling thread is enabled.\n",
 				KBUILD_MODNAME);
 		goto done_cc;
@@ -624,7 +623,7 @@ int __init msm_thermal_init(struct msm_thermal_data *pdata)
 {
 	int ret = 0;
 
-	enabled = 1;
+	intelli_enabled = 1;
 	if (num_possible_cpus() > 1)
 		core_control_enabled = 1;
 
