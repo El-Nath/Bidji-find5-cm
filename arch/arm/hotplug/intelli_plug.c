@@ -76,12 +76,11 @@ struct ip_cpu_info {
 
 static DEFINE_PER_CPU(struct ip_cpu_info, ip_info);
 
-static unsigned int screen_off_max = UINT_MAX;
-module_param(screen_off_max, uint, 0664);
-
 #define CAPACITY_RESERVE	50
 
-#if defined(CONFIG_ARCH_MSM8960) || defined(CONFIG_ARCH_APQ8064) || \
+#if defined(CONFIG_ARCH_APQ8084) || defined(CONFIG_ARM64)
+#define THREAD_CAPACITY (430 - CAPACITY_RESERVE)
+#elif defined(CONFIG_ARCH_MSM8960) || defined(CONFIG_ARCH_APQ8064) || \
 defined(CONFIG_ARCH_MSM8974)
 #define THREAD_CAPACITY	(339 - CAPACITY_RESERVE)
 #elif defined(CONFIG_ARCH_MSM8226) || defined (CONFIG_ARCH_MSM8926) || \
@@ -333,44 +332,64 @@ static void __ref intelli_plug_work_fn(struct work_struct *work)
 }
 
 #if defined(CONFIG_POWERSUSPEND) || defined(CONFIG_HAS_EARLYSUSPEND)
-static void screen_off_limit(bool on)
+void __ref intelli_plug_perf_boost(bool on)
 {
 	unsigned int cpu;
-	struct cpufreq_policy *policy;
-	struct ip_cpu_info *l_ip_info;
 
-	/* not active, so exit */
-	if (screen_off_max == UINT_MAX)
-		return;
-
-	for_each_online_cpu(cpu) {
-		l_ip_info = &per_cpu(ip_info, cpu);
-		policy = cpufreq_cpu_get(0);
-
+	if (intelli_plug_active) {
+		flush_workqueue(intelliplug_wq);
 		if (on) {
-			/* save current instance */
-			l_ip_info->cur_max = policy->max;
-			policy->max = screen_off_max;
-			policy->cpuinfo.max_freq = screen_off_max;
-#ifdef DEBUG_INTELLI_PLUG
-			pr_info("cpuinfo max is (on): %u %u\n",
-				policy->cpuinfo.max_freq, l_ip_info->sys_max);
-#endif
-		} else {
-			/* restore */
-			if (cpu != 0) {
-				l_ip_info = &per_cpu(ip_info, 0);
+			for_each_possible_cpu(cpu) {
+				if (!cpu_online(cpu))
+					cpu_up(cpu);
 			}
-			policy->cpuinfo.max_freq = l_ip_info->sys_max;
-			policy->max = l_ip_info->cur_max;
-#ifdef DEBUG_INTELLI_PLUG
-			pr_info("cpuinfo max is (off): %u %u\n",
-				policy->cpuinfo.max_freq, l_ip_info->sys_max);
-#endif
+		} else {
+			queue_delayed_work_on(0, intelliplug_wq,
+				&intelli_plug_work,
+				msecs_to_jiffies(sampling_time));
 		}
-		cpufreq_update_policy(cpu);
 	}
 }
+
+/* sysfs interface for performance boost (BEGIN) */
+static ssize_t intelli_plug_perf_boost_store(struct kobject *kobj,
+			struct kobj_attribute *attr, const char *buf,
+			size_t count)
+{
+
+	int boost_req;
+
+	sscanf(buf, "%du", &boost_req);
+
+	switch(boost_req) {
+		case 0:
+			intelli_plug_perf_boost(0);
+			return count;
+		case 1:
+			intelli_plug_perf_boost(1);
+			return count;
+		default:
+			return -EINVAL;
+	}
+}
+
+static struct kobj_attribute intelli_plug_perf_boost_attribute =
+	__ATTR(perf_boost, 0220,
+		NULL,
+		intelli_plug_perf_boost_store);
+
+static struct attribute *intelli_plug_perf_boost_attrs[] = {
+	&intelli_plug_perf_boost_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group intelli_plug_perf_boost_attr_group = {
+	.attrs = intelli_plug_perf_boost_attrs,
+};
+
+static struct kobject *intelli_plug_perf_boost_kobj;
+/* sysfs interface for performance boost (END) */
+
 #ifdef CONFIG_POWERSUSPEND
 static void intelli_plug_suspend(struct power_suspend *handler)
 #else
@@ -384,7 +403,6 @@ static void intelli_plug_suspend(struct early_suspend *handler)
 
 		mutex_lock(&intelli_plug_mutex);
 		suspended = true;
-		screen_off_limit(true);
 		mutex_unlock(&intelli_plug_mutex);
 
 		// put rest of the cores to sleep unconditionally!
@@ -432,7 +450,6 @@ static void __ref intelli_plug_resume(struct early_suspend *handler)
 		}
 
 		wakeup_boost();
-		screen_off_limit(false);
 	}
 	queue_delayed_work_on(0, intelliplug_wq, &intelli_plug_work,
 		msecs_to_jiffies(10));
@@ -572,6 +589,19 @@ int __init intelli_plug_init(void)
 	INIT_DELAYED_WORK(&intelli_plug_boost, intelli_plug_boost_fn);
 	queue_delayed_work_on(0, intelliplug_wq, &intelli_plug_work,
 		msecs_to_jiffies(10));
+
+	intelli_plug_perf_boost_kobj
+		= kobject_create_and_add("intelli_plug", kernel_kobj);
+
+	if (!intelli_plug_perf_boost_kobj) {
+		return -ENOMEM;
+	}
+
+	rc = sysfs_create_group(intelli_plug_perf_boost_kobj,
+				&intelli_plug_perf_boost_attr_group);
+
+	if (rc)
+		kobject_put(intelli_plug_perf_boost_kobj);
 
 	return 0;
 }
