@@ -496,8 +496,8 @@ static int mipi_dsi_panel_power(int on)
 			pr_err("%s: unable to enable LCD_5V_EN!!!!!!!!!!!!\n", __func__);
 			return -ENODEV;
 		}
+        mdelay(5);
 
-		mdelay(5);
 		gpio_set_value_cansleep(gpio36, 0);
 		gpio_set_value_cansleep(gpio25, 1);
 		mdelay(10);

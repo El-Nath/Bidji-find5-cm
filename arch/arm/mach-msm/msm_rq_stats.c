@@ -33,6 +33,9 @@
 #include "acpuclock.h"
 #include <linux/suspend.h>
 
+/* only enable on demand if needed */
+static bool load_stats_enabled = false;
+
 #define MAX_LONG_SIZE 24
 #define DEFAULT_RQ_POLL_JIFFIES 1
 #define DEFAULT_DEF_TIMER_JIFFIES 5
@@ -177,6 +180,23 @@ static int cpufreq_transition_handler(struct notifier_block *nb,
 	struct cpu_load_data *this_cpu = &per_cpu(cpuload, freqs->cpu);
 	int j;
 
+/* OPPO 2013-10-29 huanggd add for cpu load calc*/
+{
+	struct cpufreq_policy cpu_policy;
+	static int init_cpu2 = 1, init_cpu3 = 1;
+	if (unlikely(init_cpu2 && freqs->cpu ==2)
+		|| unlikely(init_cpu3 && freqs->cpu ==3)) {
+		cpufreq_get_policy(&cpu_policy,freqs->cpu);
+		cpumask_copy(this_cpu->related_cpus, cpu_policy.cpus);
+		if (freqs->cpu == 2)
+			init_cpu2 = 0;
+		if (freqs->cpu == 3)
+			init_cpu3 = 0;		
+		printk("%s: init cpu%d\n", __func__, freqs->cpu);
+	}
+}
+/* OPPO 2013-10-29 huanggd add end*/
+
 	switch (val) {
 	case CPUFREQ_POSTCHANGE:
 		for_each_cpu(j, this_cpu->related_cpus) {
@@ -242,6 +262,40 @@ static int freq_policy_handler(struct notifier_block *nb,
 			this_cpu->policy_max, policy->max, event);
 out:
 	return NOTIFY_DONE;
+}
+
+void enable_rq_load_calc(bool on)
+{
+	int cpu;
+
+	if (on != load_stats_enabled){
+		load_stats_enabled = on;
+
+		pr_info("Enable rq_stats load calculation %d\n", load_stats_enabled);
+		if (load_stats_enabled) {
+			// clear data
+			for_each_possible_cpu(cpu) {
+				struct cpu_load_data *pcpu = &per_cpu(cpuload, cpu);
+
+				pcpu->prev_cpu_idle = 0;
+				pcpu->prev_cpu_wall = 0;
+				pcpu->prev_cpu_iowait = 0;
+				pcpu->avg_load_maxfreq = 0;
+			}
+
+			cpufreq_register_notifier(&freq_transition,
+					CPUFREQ_TRANSITION_NOTIFIER);
+			register_hotcpu_notifier(&cpu_hotplug);
+			cpufreq_register_notifier(&freq_policy,
+					CPUFREQ_POLICY_NOTIFIER);
+		} else {
+			cpufreq_unregister_notifier(&freq_transition,
+					CPUFREQ_TRANSITION_NOTIFIER);
+			unregister_hotcpu_notifier(&cpu_hotplug);
+			cpufreq_unregister_notifier(&freq_policy,
+					CPUFREQ_POLICY_NOTIFIER);
+		}
+	}
 }
 
 static ssize_t hotplug_disable_show(struct kobject *kobj,
@@ -424,12 +478,15 @@ static int __init msm_rq_stats_init(void)
 	freq_transition.notifier_call = cpufreq_transition_handler;
 	cpu_hotplug.notifier_call = cpu_hotplug_handler;
 	freq_policy.notifier_call = freq_policy_handler;
-	cpufreq_register_notifier(&freq_transition,
+	
+	if (load_stats_enabled){
+		cpufreq_register_notifier(&freq_transition,
 					CPUFREQ_TRANSITION_NOTIFIER);
-	register_hotcpu_notifier(&cpu_hotplug);
-	cpufreq_register_notifier(&freq_policy,
+		register_hotcpu_notifier(&cpu_hotplug);
+		cpufreq_register_notifier(&freq_policy,
 					CPUFREQ_POLICY_NOTIFIER);
-
+	}
+	
 	return ret;
 }
 late_initcall(msm_rq_stats_init);
