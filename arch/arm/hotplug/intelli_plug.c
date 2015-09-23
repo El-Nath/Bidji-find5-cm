@@ -27,7 +27,7 @@
 #include <linux/cpufreq.h>
 
 #define INTELLI_PLUG_MAJOR_VERSION	4
-#define INTELLI_PLUG_MINOR_VERSION	0
+#define INTELLI_PLUG_MINOR_VERSION	1
 
 #define DEF_SAMPLING_MS			HZ / 2
 #define RESUME_SAMPLING_MS		HZ / 10
@@ -39,6 +39,7 @@
 #define DEFAULT_MAX_CPUS_ONLINE		NR_CPUS
 #define DEFAULT_NR_FSHIFT		DEFAULT_MAX_CPUS_ONLINE - 1
 #define DEFAULT_DOWN_LOCK_DUR		2500
+#define DEFAULT_MAX_CPUS_ONLINE_SUSP	NR_CPUS / 2
 
 static struct mutex intelli_plug_mutex;
 static u64 last_boost_time, last_input;
@@ -49,20 +50,14 @@ static struct workqueue_struct *intelliplug_wq;
 
 static bool hotplug_suspended = false;
 
-struct ip_cpu_info {
-	int cpu;
-	unsigned int curr_max;
-};
-
-static DEFINE_PER_CPU(struct ip_cpu_info, ip_info);
-
 /* HotPlug Driver controls */
 static atomic_t intelli_plug_active = ATOMIC_INIT(0);
-static unsigned int wake_boost_active = 0;
 static unsigned int cpus_boosted = DEFAULT_NR_CPUS_BOOSTED;
 static unsigned int min_cpus_online = DEFAULT_MIN_CPUS_ONLINE;
 static unsigned int max_cpus_online = DEFAULT_MAX_CPUS_ONLINE;
-static unsigned int screen_off_max = UINT_MAX;
+static unsigned int min_cpus_online_res = DEFAULT_MIN_CPUS_ONLINE;
+static unsigned int max_cpus_online_res = DEFAULT_MAX_CPUS_ONLINE;
+static unsigned int max_cpus_online_susp = DEFAULT_MAX_CPUS_ONLINE_SUSP;
 
 /* HotPlug Driver Tuning */
 static unsigned int target_cpus = 0;
@@ -240,7 +235,7 @@ static void intelli_plug_work_fn(struct work_struct *work)
 {
 	unsigned int cpu_count;
 
-	if (hotplug_suspended) {
+	if (hotplug_suspended && max_cpus_online_susp <= 1) {
 		if (debug_intelli_plug)
 			pr_info("intelli_plug is suspended!\n");
 		return;
@@ -263,59 +258,7 @@ static void intelli_plug_work_fn(struct work_struct *work)
 					msecs_to_jiffies(def_sampling_ms));
 }
 
-static void __ref wakeup_boost(void)
-{
-	unsigned int cpu, ret;
-	struct cpufreq_policy policy;
-
-	for_each_cpu_not(cpu, cpu_online_mask) {
-		if (NR_CPUS == num_online_cpus())
-			break;
-		if (cpu == 0)
-			continue;
-		cpu_up(cpu);
-		apply_down_lock(cpu);
-	}
-
-	for_each_online_cpu(cpu) {
-		ret = cpufreq_get_policy(&policy, cpu);
-		if (ret)
-			continue;
-		policy.cur = policy.max;
-		cpufreq_update_policy(cpu);
-	}
-}
-
 #if defined(CONFIG_POWERSUSPEND) || defined(CONFIG_HAS_EARLYSUSPEND)
-static void screen_off_limit(bool on)
-{
-	unsigned int i, ret;
-	struct cpufreq_policy policy;
-	struct ip_cpu_info *l_ip_info;
-
-	/* not active, so exit */
-	if (screen_off_max == UINT_MAX)
-		return;
-
-	for_each_online_cpu(i) {
-
-		l_ip_info = &per_cpu(ip_info, i);
-		ret = cpufreq_get_policy(&policy, i);
-		if (ret)
-			continue;
-
-		if (on) {
-			/* save current instance */
-			l_ip_info->curr_max = policy.max;
-			policy.max = screen_off_max;
-		} else {
-			/* restore */
-			policy.max = l_ip_info->curr_max;
-		}
-		cpufreq_update_policy(i);
-	}
-}
-
 #ifdef CONFIG_POWERSUSPEND
 static void intelli_plug_suspend(struct power_suspend *handler)
 #else
@@ -327,16 +270,23 @@ static void intelli_plug_suspend(struct early_suspend *handler)
 	if (atomic_read(&intelli_plug_active) == 0)
 		return;
 
-	/* flush hotplug workqueue */
+	mutex_lock(&intelli_plug_mutex);
+	hotplug_suspended = true;
+	min_cpus_online_res = min_cpus_online;
+	min_cpus_online = 1;
+	max_cpus_online_res = max_cpus_online;
+	max_cpus_online = max_cpus_online_susp;
+	mutex_unlock(&intelli_plug_mutex);
+
+	/* Do not cancel hotplug work unless max_cpus_online_susp is 1 */
+	if (max_cpus_online_susp > 1)
+		return;
+
+	/* Flush hotplug workqueue */
 	flush_workqueue(intelliplug_wq);
 	cancel_delayed_work_sync(&intelli_plug_work);
 
-	mutex_lock(&intelli_plug_mutex);
-	hotplug_suspended = true;
-	screen_off_limit(true);
-	mutex_unlock(&intelli_plug_mutex);
-
-	/* put rest of the cores to sleep! */
+	/* Put all sibling cores to sleep */
 	for_each_online_cpu(cpu) {
 		if (cpu == 0)
 			continue;
@@ -350,36 +300,36 @@ static void __cpuinit intelli_plug_resume(struct power_suspend *handler)
 static void __ref intelli_plug_resume(struct early_suspend *handler)
 #endif
 {
-	int cpu;
+	int cpu, required_reschedule = 0;
 
 	if (atomic_read(&intelli_plug_active) == 0)
 		return;
 
-	mutex_lock(&intelli_plug_mutex);
-	hotplug_suspended = false;
-	screen_off_limit(false);
-	mutex_unlock(&intelli_plug_mutex);
-
-	if (wake_boost_active)
-		/* wake up and boost all cores to max freq */
-		wakeup_boost();
-	else {
-		/* wake up all possible cores */
-		for_each_cpu_not(cpu, cpu_online_mask) {
-			if (max_cpus_online <= num_online_cpus())
-				break;
-			if (cpu == 0)
-				continue;
-			cpu_up(cpu);
-			apply_down_lock(cpu);
+	if (hotplug_suspended) {
+		mutex_lock(&intelli_plug_mutex);
+		hotplug_suspended = false;
+		min_cpus_online = min_cpus_online_res;
+		max_cpus_online = max_cpus_online_res;
+		mutex_unlock(&intelli_plug_mutex);
+		/* Initiate hotplug work if it was cancelled */
+		if (max_cpus_online_susp <= 1) {
+			required_reschedule = 1;
+			INIT_DELAYED_WORK(&intelli_plug_work, intelli_plug_work_fn);
 		}
 	}
 
-	INIT_DELAYED_WORK(&intelli_plug_work, intelli_plug_work_fn);
+	/* Fire up all CPUs */
+	for_each_cpu_not(cpu, cpu_online_mask) {
+		if (cpu == 0)
+			continue;
+		cpu_up(cpu);
+		apply_down_lock(cpu);
+	}
 
-	/* resume hotplug workqueue */
-	queue_delayed_work_on(0, intelliplug_wq, &intelli_plug_work,
-			      msecs_to_jiffies(RESUME_SAMPLING_MS));
+	/* Resume hotplug workqueue if required */
+	if (required_reschedule)
+		queue_delayed_work_on(0, intelliplug_wq, &intelli_plug_work,
+				      msecs_to_jiffies(RESUME_SAMPLING_MS));
 }
 
 #ifdef CONFIG_POWERSUSPEND
@@ -565,16 +515,15 @@ static ssize_t show_##file_name					\
 	return sprintf(buf, "%u\n", object);			\
 }
 
-show_one(wake_boost_active, wake_boost_active);
 show_one(cpus_boosted, cpus_boosted);
 show_one(min_cpus_online, min_cpus_online);
 show_one(max_cpus_online, max_cpus_online);
+show_one(max_cpus_online_susp, max_cpus_online_susp);
 show_one(def_sampling_ms, def_sampling_ms);
 show_one(debug_intelli_plug, debug_intelli_plug);
 show_one(nr_fshift, nr_fshift);
 show_one(nr_run_hysteresis, nr_run_hysteresis);
 show_one(down_lock_duration, down_lock_dur);
-show_one(screen_off_max, screen_off_max);
 
 #define store_one(file_name, object)		\
 static ssize_t store_##file_name		\
@@ -594,14 +543,12 @@ static ssize_t store_##file_name		\
 	return count;				\
 }
 
-store_one(wake_boost_active, wake_boost_active);
 store_one(cpus_boosted, cpus_boosted);
 store_one(def_sampling_ms, def_sampling_ms);
 store_one(debug_intelli_plug, debug_intelli_plug);
 store_one(nr_fshift, nr_fshift);
 store_one(nr_run_hysteresis, nr_run_hysteresis);
 store_one(down_lock_duration, down_lock_dur);
-store_one(screen_off_max, screen_off_max);
 
 static ssize_t show_intelli_plug_active(struct kobject *kobj,
 					struct kobj_attribute *attr,
@@ -693,36 +640,50 @@ static ssize_t store_max_cpus_online(struct kobject *kobj,
 	return count;
 }
 
+static ssize_t store_max_cpus_online_susp(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	int ret;
+	unsigned int val;
+
+	ret = sscanf(buf, "%u", &val);
+	if (ret != 1 || val < 1 || val > NR_CPUS)
+		return -EINVAL;
+
+	max_cpus_online_susp = val;
+
+	return count;
+}
+
 #define KERNEL_ATTR_RW(_name) \
 static struct kobj_attribute _name##_attr = \
 	__ATTR(_name, 0644, show_##_name, store_##_name)
 
 KERNEL_ATTR_RW(intelli_plug_active);
-KERNEL_ATTR_RW(wake_boost_active);
 KERNEL_ATTR_RW(cpus_boosted);
 KERNEL_ATTR_RW(min_cpus_online);
 KERNEL_ATTR_RW(max_cpus_online);
+KERNEL_ATTR_RW(max_cpus_online_susp);
 KERNEL_ATTR_RW(boost_lock_duration);
 KERNEL_ATTR_RW(def_sampling_ms);
 KERNEL_ATTR_RW(debug_intelli_plug);
 KERNEL_ATTR_RW(nr_fshift);
 KERNEL_ATTR_RW(nr_run_hysteresis);
 KERNEL_ATTR_RW(down_lock_duration);
-KERNEL_ATTR_RW(screen_off_max);
 
 static struct attribute *intelli_plug_attrs[] = {
 	&intelli_plug_active_attr.attr,
-	&wake_boost_active_attr.attr,
 	&cpus_boosted_attr.attr,
 	&min_cpus_online_attr.attr,
 	&max_cpus_online_attr.attr,
+	&max_cpus_online_susp_attr.attr,
 	&boost_lock_duration_attr.attr,
 	&def_sampling_ms_attr.attr,
 	&debug_intelli_plug_attr.attr,
 	&nr_fshift_attr.attr,
 	&nr_run_hysteresis_attr.attr,
 	&down_lock_duration_attr.attr,
-	&screen_off_max_attr.attr,
 	NULL,
 };
 
