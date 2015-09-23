@@ -57,7 +57,7 @@ static struct msm_thermal_data msm_thermal_info = {
 static uint32_t limited_max_freq_thermal = UINT_MAX;
 static uint32_t limited_min_freq_thermal;
 static struct delayed_work check_temp_work;
-static bool core_control_enabled;
+bool core_control_enabled;
 static unsigned int debug_mode = 0;
 static uint32_t cpus_offlined;
 static DEFINE_MUTEX(core_control_mutex);
