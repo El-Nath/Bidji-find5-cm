@@ -152,4 +152,6 @@ source "drivers/android/Kconfig"
 
 source "drivers/coresight/Kconfig"
 
+source "drivers/cpuquiet/Kconfig"
+
 endmenu
