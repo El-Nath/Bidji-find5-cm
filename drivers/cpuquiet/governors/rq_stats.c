@@ -38,19 +38,19 @@ static struct delayed_work rq_stats_work;
 static struct kobject *rq_stats_kobject;
 
 /* configurable parameters */
-static unsigned int sample_rate = 70;		/* msec */
+static unsigned int sample_rate = 50;		/* msec */
 static unsigned int start_delay = 20000;
 static RQ_STATS_STATE rq_stats_state;
 static struct workqueue_struct *rq_stats_wq;
 
 static unsigned int nwns_threshold[8] = {20, 14, 26, 16, 30, 18, 0, 20};
-static unsigned int twts_threshold[8] = {140, 0, 140, 190, 140, 190, 0, 190};
+static unsigned int twts_threshold[8] = {50, 0, 50, 50, 50, 50, 0, 50};
 
 extern unsigned int get_rq_info(void);
 
 static u64 input_boost_end_time = 0;
 static bool input_boost_running = false;
-static unsigned int input_boost_duration = 3 * 70; /* ms */
+static unsigned int input_boost_duration = 2 * 50; /* ms */
 static unsigned int input_boost_cpus = 2;
 static unsigned int input_boost_enabled = true;
 static bool input_boost_task_alive = false;
@@ -402,6 +402,9 @@ static void rq_stats_device_free(void)
 {
 	hotplug_info("%s\n", __func__);
 	if (rq_stats_state == DISABLED) {
+		first_call = true;
+		total_time = 0;
+		last_time = 0;	
 		rq_stats_state = IDLE;
 		rq_stats_work_func(NULL);
 	}
@@ -409,10 +412,12 @@ static void rq_stats_device_free(void)
 
 static void load_stats_touch_event(void)
 {
+	if (rq_stats_state == DISABLED)
+		return;
+
 	if (!cpq_is_suspended() && input_boost_enabled && !input_boost_running){
 		if (input_boost_task_alive)
-			wake_up_process(input_boost_task);
-		
+			wake_up_process(input_boost_task);	
 	}
 }
 
@@ -424,6 +429,7 @@ static void rq_stats_stop(void)
 	if (input_boost_task_alive)
 		kthread_stop(input_boost_task);
 
+	input_boost_task_alive = false;
 	destroy_workqueue(rq_stats_wq);
 	kobject_put(rq_stats_kobject);
 }
